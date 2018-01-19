@@ -4,7 +4,7 @@ Created on Sun Jan  7 19:49:01 2018
 
 @author: Jack Yang
 """
-from binance.client import Client
+
 import urllib,requests
 import pandas as pd
 import numpy as np
@@ -29,8 +29,6 @@ class Agent():
     def __init__(self,trader):
         assert trader in self.traders.keys(), 'Not valid trading platform!'
         self.trader = trader
-        if trader == 'binance':
-            self.binance_client = Client(self.api_keys[trader],self.secret_keys[trader])
     
     def _http_get_request(self,url, params, add_to_headers=None):
         headers = {
@@ -55,7 +53,9 @@ class Agent():
             
     def get_all_symbol_price(self):
         if self.trader == 'binance':
-            self.all_symbol_price = {r['symbol']:float(r['price' ]) for r in self.binance_client.get_all_tickers()}
+            path = 'api/v1/ticker/allPrices'
+            self.all_symbol_price = {r['symbol']:float(r['price' ]) for r in self._http_get_request(self.traders[self.trader]\
+                           +path,{})}
         elif self.trader == 'huobi':
             path = 'v1/common/symbols'
             self.all_symbol_price={}
@@ -80,7 +80,8 @@ class Agent():
         params: symbol, interval, limit
         """
         if self.trader == 'binance':
-            df = pd.DataFrame(self.binance_client.get_klines(**params))
+            path = 'api/v1/klines'
+            df = pd.DataFrame(self._http_get_request(self.traders[self.trader]+path,params))
             del df[6]
             del df[9]
             del df[10]
@@ -124,15 +125,17 @@ class Agent():
             
     def pull_order_book(self,symbol,limit=1000,pull_interval=5):
         if self.trader == 'binance':
-            r = self.binance_client.get_order_book(symbol=symbol,limit=limit)
+            path = 'api/v1/depth'
+            path2 = 'api/v1/ticker/allPrices'
+            r = self._http_get_request(self.traders[self.trader]+path,{'symbol':symbol,'limit':limit})
             previous_bids = [bid[0]+'_'+bid[1] for bid in r['bids']]
             previous_asks = [ask[0]+'_'+ask[1] for ask in r['asks']]
             d = {}
             while True:
                 time.sleep(pull_interval)
                 try:
-                    r = self.binance_client.get_order_book(symbol=symbol,limit=limit)
-                    price = [i['price'] for i in self.binance_client.get_all_tickers() if i['symbol'] == symbol][0]
+                    r = self._http_get_request(self.traders[self.trader]+path,{'symbol':symbol,'limit':limit})
+                    price = [i['price'] for i in self._http_get_request(self.traders[self.trader]+path2,{}) if i['symbol'] == symbol][0]
                     bids = [bid[0]+'_'+bid[1] for bid in r['bids']]
                     diff_bids = np.setdiff1d(bids,previous_bids)
                     asks = [ask[0]+'_'+ask[1] for ask in r['asks']]
@@ -152,7 +155,7 @@ class Agent():
                 
             
 if __name__== '__main__':
-    Agent('binance').pull_order_book('BTCUSDT')
+    Agent('binance').pull_order_book(symbol='BTCUSDT')
     #print(datetime.fromtimestamp(1516246476484/1000).strftime('%Y-%m-%d %H-%M'))
 
             
