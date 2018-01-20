@@ -123,40 +123,50 @@ class Agent():
         return pd.merge(df,df_base, on='symbol').query('open_ts_x < open_ts_y +{} and open_ts_x > open_ts_y'.format(days*24*3600*1000))\
             .groupby('symbol').agg({'high_x':np.max,'high_y':np.max}).astype(dtype='float64').query('high_x>high_y*{}'.format(growth_ratio)) 
             
-    def pull_order_book(self,symbol,limit=1000,pull_interval=5):
+    def pull_depth_trade(self,symbol,limit=1000,pull_interval=5):
         if self.trader == 'binance':
-            path = 'api/v1/depth'
-            path2 = 'api/v1/ticker/allPrices'
-            r = self._http_get_request(self.traders[self.trader]+path,{'symbol':symbol,'limit':limit})
-            previous_bids = [bid[0]+'_'+bid[1] for bid in r['bids']]
-            previous_asks = [ask[0]+'_'+ask[1] for ask in r['asks']]
+            path_depth = 'api/v1/depth'
+            path_ticker = 'api/v1/ticker/allPrices'
+            path_trade = 'api/v1/aggTrades'
+            previous_bids = []
+            previous_asks = []
+            previous_trade_id = []
             d = {}
             while True:
-                time.sleep(pull_interval)
+            #for i in range(3):
                 try:
-                    r = self._http_get_request(self.traders[self.trader]+path,{'symbol':symbol,'limit':limit})
-                    price = [i['price'] for i in self._http_get_request(self.traders[self.trader]+path2,{}) if i['symbol'] == symbol][0]
+                    price = [i['price'] for i in self._http_get_request(self.traders[self.trader]+path_ticker,{}) if i['symbol'] == symbol][0]
+                    r = self._http_get_request(self.traders[self.trader]+path_depth,{'symbol':symbol,'limit':limit})
+                    trades = self._http_get_request(self.traders[self.trader]+path_trade,{'symbol':symbol,'limit':limit})
                     bids = [bid[0]+'_'+bid[1] for bid in r['bids']]
-                    diff_bids = np.setdiff1d(bids,previous_bids)
                     asks = [ask[0]+'_'+ask[1] for ask in r['asks']]
+                    trade_id = [i['a'] for i in trades]
                 except Exception as e:
                     print('error:', e)
                     continue
+                diff_bids = np.setdiff1d(bids,previous_bids)
                 diff_asks = np.setdiff1d(asks,previous_asks)
+                diff_trade_id = np.setdiff1d(trade_id,previous_trade_id)
+                diff_trades = [{'p':i['p'],'q':i['q'],'m':i['m'],'M':i['M']} for i in trades if i['a'] in diff_trade_id]
                 previous_bids = bids
                 previous_asks = asks
-                d[int(time.time()*1000)] = {'bids':diff_bids.tolist(),'asks': diff_asks.tolist(),'price':price}
+                previous_trade_id = trade_id
+                d[int(time.time()*1000)] = {'bids':diff_bids.tolist(),'asks': diff_asks.tolist(),'price':price,'trades':diff_trades}
                 if len(d)%100 == 0:
                     print('saving file with length {}'.format(len(d)))
                     with open('order_book_{}.json'.format(symbol), 'w') as fp:
                         json.dump(d, fp)
+                time.sleep(pull_interval)
             with open('order_book_{}.json'.format(symbol), 'w') as fp:
                 json.dump(d, fp)
                 
             
 if __name__== '__main__':
-    Agent('binance').pull_order_book(symbol='BTCUSDT')
+    Agent('binance').pull_depth_trade(symbol='BTCUSDT')
     #print(datetime.fromtimestamp(1516246476484/1000).strftime('%Y-%m-%d %H-%M'))
+    #with open('order_book_BTCUSDT_1.json', 'r') as f:
+    #    d = json.load(f)
+
 
             
     
