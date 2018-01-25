@@ -107,22 +107,27 @@ class Agent():
         else:
             raise BaseException
     
-    def get_all_klines(self,interval='1d',limit=500):
-        self.get_all_symbol_price()
+    def get_all_klines(self,interval='1d',limit=500, force_refresh_data=False):
+        if not self.all_symbol_price or force_refresh_data:
+            self.get_all_symbol_price()
         df2 = pd.DataFrame()
         print('getting kline for all symbols...')
         for symbol in tqdm(self.all_symbol_price.keys(),unit='symbol'):
             df1 = self.get_symbol_kline(symbol=symbol,interval=interval, limit = limit)
             df2 = pd.concat([df1,df2])
             time.sleep(0.1)
-        return df2.reset_index(drop=True)
+        self.all_klines = df2.reset_index(drop=True)
+        return self.all_klines
     
-    def get_growth_ratio_within(self,days=7,growth_ratio=2,growth_above=True):
+    def get_growth_ratio_within(self,days=7,growth_ratio=2,growth_above=True, force_refresh_data=False):
         """
         return symbols which grow more or less than growth_ratio within x days starting from the 1st day
         """
         comparitor = '>' if growth_above else '<'
-        df = self.get_all_klines()
+        if not self.all_klines or force_refresh_data:
+            df = self.get_all_klines()
+        else:
+            df = self.all_klines
         df_base = (df.assign(rn=df.sort_values(['open_ts'], ascending=True).groupby(['symbol']).cumcount() + 1).query('rn == 1'))
         return pd.merge(df,df_base, on='symbol').query('open_ts_x < open_ts_y +{} and open_ts_x > open_ts_y'.format(days*24*3600*1000))\
             .groupby('symbol').agg({'high_x':np.max,'high_y':np.max}).astype(dtype='float64').query('high_x{}high_y*{}'.format(comparitor,growth_ratio)) 
