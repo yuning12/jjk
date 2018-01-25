@@ -12,6 +12,7 @@ from tqdm import tqdm
 import time
 import json
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 class Agent():
     INTERVAL_1MIN='1m'
@@ -40,6 +41,7 @@ class Agent():
         postdata = urllib.parse.urlencode(params)
 
         try:
+            response = None
             response = requests.get(url, postdata, headers=headers, timeout=20)
 
             if response.status_code == 200:
@@ -48,7 +50,8 @@ class Agent():
                 return
         except BaseException as e:
                 print('Exception is: {}'.format(e))
-                print("httpGet failed, detail is:%s,%s" %(response.text,response.status_code))
+                if response:
+                    print("httpGet failed, detail is:%s,%s" %(response.text,response.status_code))
                 return
             
     def get_all_symbol_price(self):
@@ -112,16 +115,17 @@ class Agent():
             df1 = self.get_symbol_kline(symbol=symbol,interval=interval, limit = limit)
             df2 = pd.concat([df1,df2])
             time.sleep(0.1)
-        return df2.reset_index()
+        return df2.reset_index(drop=True)
     
-    def get_high_growth_ratio_within(self,days=7,growth_ratio=2):
+    def get_growth_ratio_within(self,days=7,growth_ratio=2,growth_above=True):
         """
-        return symbols which grow more than growth_ratio within x days starting from the 1st day
+        return symbols which grow more or less than growth_ratio within x days starting from the 1st day
         """
+        comparitor = '>' if growth_above else '<'
         df = self.get_all_klines()
         df_base = (df.assign(rn=df.sort_values(['open_ts'], ascending=True).groupby(['symbol']).cumcount() + 1).query('rn == 1'))
         return pd.merge(df,df_base, on='symbol').query('open_ts_x < open_ts_y +{} and open_ts_x > open_ts_y'.format(days*24*3600*1000))\
-            .groupby('symbol').agg({'high_x':np.max,'high_y':np.max}).astype(dtype='float64').query('high_x>high_y*{}'.format(growth_ratio)) 
+            .groupby('symbol').agg({'high_x':np.max,'high_y':np.max}).astype(dtype='float64').query('high_x{}high_y*{}'.format(comparitor,growth_ratio)) 
             
     def pull_depth_trade(self,symbol,limit=1000,pull_interval=5):
         if self.trader == 'binance':
@@ -143,6 +147,7 @@ class Agent():
                     trade_id = [i['a'] for i in trades]
                 except Exception as e:
                     print('error:', e)
+                    time.sleep(600)
                     continue
                 diff_bids = np.setdiff1d(bids,previous_bids)
                 diff_asks = np.setdiff1d(asks,previous_asks)
@@ -159,14 +164,53 @@ class Agent():
                 time.sleep(pull_interval)
             with open('order_book_{}.json'.format(symbol), 'w') as fp:
                 json.dump(d, fp)
+    
+    def process_depth_trade(data_dict,valid_price_delta=0.1):
+        all_records=[]
+        for key, value in sorted(data_dict.items()):
+            one_record = {}
+            one_record['ts']=key
+            one_record['price']=float(value['price'])
+            valid_bids = [i.split('_') for i in value['bids'] if float(i.split('_')[0]) > one_record['price']*(1-valid_price_delta) ]
+            bids_p_diff=np.array([float(i[0]) for i in valid_bids])-one_record['price']
+            bids_q=np.array([float(i[1]) for i in valid_bids])
+            one_record['bid_demand'] = np.dot(bids_p_diff,bids_q)
+            valid_asks = [i.split('_') for i in value['asks'] if float(i.split('_')[0]) < one_record['price']*(1+valid_price_delta) ]
+            asks_p_diff=np.array([float(i[0]) for i in valid_asks])-one_record['price']
+            asks_q=np.array([float(i[1]) for i in valid_asks])
+            one_record['ask_demand'] = np.dot(asks_p_diff,asks_q)
+            trades_p_diff=np.array([float(i['p']) for i in value['trades']])-one_record['price']
+            trades_q=np.array([float(i['q']) for i in value['trades']])
+            one_record['trade_demand'] = np.dot(trades_p_diff,trades_q)
+            one_record['trade_count'] = len(trades_q)
+            one_record['buyer_maker_count'] = len([i['m'] for i in value['trades'] if i['m']] )
+            one_record['best_price_count'] = len([i['m'] for i in value['trades'] if i['M']])
+            all_records.append(one_record)
+        df = pd.DataFrame(all_records,columns = ['ts', 'price','bid_demand','ask_demand','trade_demand','trade_count','buyer_maker_count',\
+                                     'best_price_count'])
+        return df
+            
+    def analyze_depth_trade(df):
+        df['total_demand']=df['bid_demand']+df['ask_demand']+df['trade_demand']
+        s = df['total_demand'].cumsum().sort_values().tail()
+        plt.figure(1, figsize=(22, 6))
+        plt.subplot(131)
+        plt.plot(df['price'])
+        plt.subplot(132)
+        plt.plot(df['total_demand'])
+        plt.suptitle('price vs trade demand')
+        plt.show()
+    
                 
             
 if __name__== '__main__':
-    Agent('binance').pull_depth_trade(symbol='BTCUSDT')
+    #Agent('binance').pull_depth_trade(symbol='BTCUSDT')
     #print(datetime.fromtimestamp(1516246476484/1000).strftime('%Y-%m-%d %H-%M'))
-    #with open('order_book_BTCUSDT_1.json', 'r') as f:
-    #    d = json.load(f)
+    with open('order_book_BTCUSDT.json', 'r') as f1,open('order_book_BTCUSDT_1.json', 'r') as f2,open('order_book_BTCUSDT_2.json','r') as f3:
+        d1 = json.load(f1)
+        d2 = json.load(f2)
+        d3 = json.load(f3)
+    #df = Agent.process_depth_trade({**d1,**d2,**d3})
+    df = Agent.process_depth_trade(d1)
+    Agent.analyze_depth_trade(df)
 
-
-            
-    
