@@ -152,7 +152,8 @@ class Agent():
                     trade_id = [i['a'] for i in trades]
                 except Exception as e:
                     print('error:', e)
-                    time.sleep(600)
+                    print('error happens at '+str(datetime.now()))
+                    time.sleep(300)
                     continue
                 diff_bids = np.setdiff1d(bids,previous_bids)
                 diff_asks = np.setdiff1d(asks,previous_asks)
@@ -174,7 +175,7 @@ class Agent():
         all_records=[]
         for key, value in sorted(data_dict.items()):
             one_record = {}
-            one_record['ts']=key
+            one_record['ts']=int(key)
             one_record['price']=float(value['price'])
             valid_bids = [i.split('_') for i in value['bids'] if float(i.split('_')[0]) > one_record['price']*(1-valid_price_delta) ]
             bids_p_diff=np.array([float(i[0]) for i in valid_bids])-one_record['price']
@@ -197,13 +198,24 @@ class Agent():
             
     def analyze_depth_trade(df):
         df['total_demand']=df['bid_demand']+df['ask_demand']+df['trade_demand']
-        s = df['total_demand'].cumsum().sort_values().tail()
+        #s = df['total_demand'].cumsum().sort_values().tail()
+        df['min'] = df['ts']/1000/5//60
+        df_demand= df.groupby('min',as_index=False).agg({'price': np.mean,'total_demand':np.sum})
+        df_demand['min_lead'] = df_demand['min']+1
+        df_init_price = (df.assign(rn=df.sort_values(['ts'], ascending=True).groupby(['min']).cumcount()).query('rn == 0'))
+        df_final_price = (df.assign(rn=df.sort_values(['ts'], ascending=False).groupby(['min']).cumcount()).query('rn == 0'))
+        df_price_growth = df_init_price.merge(df_final_price,on='min')[['min','price_x','price_y']]
+        df_price_growth['price_growth'] = df_price_growth['price_y']/df_price_growth['price_x']
+        
+        df_result = df_demand.merge(df_price_growth, left_on='min_lead', right_on='min')[['total_demand','price_growth']]
+        
         plt.figure(1, figsize=(22, 6))
-        plt.subplot(131)
-        plt.plot(df['price'])
-        plt.subplot(132)
-        plt.plot(df['total_demand'])
-        plt.suptitle('price vs trade demand')
+        plt.scatter(df_result['total_demand'],df_result['price_growth'])
+        #plt.subplot(131)
+        #plt.plot(df_demand['price'])
+        #plt.subplot(132)
+        #plt.plot(df_demand['total_demand'])
+        #plt.suptitle('price vs total demand')
         plt.show()
     
                 
@@ -211,11 +223,10 @@ class Agent():
 if __name__== '__main__':
     #Agent('binance').pull_depth_trade(symbol='BTCUSDT')
     #print(datetime.fromtimestamp(1516246476484/1000).strftime('%Y-%m-%d %H-%M'))
-    with open('order_book_BTCUSDT.json', 'r') as f1,open('order_book_BTCUSDT_1.json', 'r') as f2,open('order_book_BTCUSDT_2.json','r') as f3:
+    with open('order_book_BTCUSDT.json', 'r') as f1,open('order_book_BTCUSDT_1.json', 'r') as f2,open('order_book_BTCUSDT_3.json','r') as f3:
         d1 = json.load(f1)
         d2 = json.load(f2)
         d3 = json.load(f3)
     #df = Agent.process_depth_trade({**d1,**d2,**d3})
-    df = Agent.process_depth_trade(d1)
+    df = Agent.process_depth_trade(d3)
     Agent.analyze_depth_trade(df)
-
