@@ -13,6 +13,7 @@ import time
 import json
 from datetime import datetime
 import matplotlib.pyplot as plt
+import seaborn as sns
 
 class Agent():
     INTERVAL_1MIN='1m'
@@ -24,12 +25,17 @@ class Agent():
                  ('huobi',INTERVAL_1WEEK):'1week',('huobi',INTERVAL_1MONTH):'1mon'}
     traders = {'huobi':'https://api.huobi.pro/','bittrex':'https://bittrex.com/api/v1.1/',
                          'binance':'https://api.binance.com/'}
-    api_keys = {'binance':'CRejMTuSYokbz2JeNBBo1cb1nt3IOL8d1pcAjeBoq9qavYKuqAQLWfxFMFsqn70o'}
-    secret_keys = {'binance': 'OEKkQ2R328yMF4LAGw5K15tBwIuISYzjLpZ7nSQK8qHLWMI9AjGas6t31xvGDhUy'}
+    with open('api_keys.json', 'r') as f1,open('secret_keys.json', 'r') as f2:
+        api_keys = json.load(f1)
+        secret_keys = json.load(f2)
     
+    trade_strategy = {'single_sell_ratio':0.1,'single_buy_ratio':0.1}
+        
     def __init__(self,trader):
         assert trader in self.traders.keys(), 'Not valid trading platform!'
         self.trader = trader
+        self.all_symbol_price = None
+        self.all_klines=None
     
     def _http_get_request(self,url, params, add_to_headers=None):
         headers = {
@@ -81,6 +87,7 @@ class Agent():
     def get_symbol_kline(self,**params):
         """
         params: symbol, interval, limit
+        return dataframe with columns: 'open_ts','open','high','low','close','volume','asset_volume','trades','symbol','interval'
         """
         if self.trader == 'binance':
             path = 'api/v1/klines'
@@ -108,6 +115,9 @@ class Agent():
             raise BaseException
     
     def get_all_klines(self,interval='1d',limit=500, force_refresh_data=False):
+        """
+        return dataframe with columns: 'open_ts','open','high','low','close','volume','asset_volume','trades','symbol','interval'
+        """
         if not self.all_symbol_price or force_refresh_data:
             self.get_all_symbol_price()
         df2 = pd.DataFrame()
@@ -218,15 +228,90 @@ class Agent():
         #plt.suptitle('price vs total demand')
         plt.show()
     
+    def price_down_then_up(self,cleaned_klines,down_days=3,up_days=6,down_percent=40,up_percent=15):
+        df = cleaned_klines
+        df_low_price=pd.merge(df,df, on=['symbol']).query('open_ts_x > open_ts_y and open_ts_x-open_ts_y<={}*24*3600*1000 and low_x < high_y*{}'
+                             .format(down_days,1-down_percent/100.0))[['open_ts_x','open_ts_y','low_x','high_y','symbol']]\
+                             .rename(columns={"open_ts_x": "ts_low", "open_ts_y": "ts_high","low_x":"low_price",'high_y':'high_price'})
+        num_price_recover=len(pd.merge(df,df_low_price, on=['symbol']).query('open_ts > ts_low and open_ts-ts_low<={}*24*3600*1000 and high > low_price*{}'
+                                 .format(up_days,1+up_percent/100.0))[['ts_low','ts_high','symbol']].drop_duplicates())
+        ratio = 0 if len(df_low_price)==0 else num_price_recover/float(len(df_low_price))
+        total_occur_count = len(df_low_price)
+        return ratio,total_occur_count
+    
+    def find_all_price_down_then_up(self,down_days=3,up_days=6,klines_by_file=True):
+        if klines_by_file:
+            self.all_klines=pd.read_csv('all_klines.csv')
+            df=self.all_klines
+        if self.all_klines is None:
+            df=self.get_all_klines(interval='1h')
+            df.to_csv('all_klines.csv',index=False)
+        #remove the data for the first day of each symbol
+        df= df.assign(rn=df.sort_values(['open_ts'], ascending=True).groupby(['symbol']).cumcount()).query('rn >= 24').astype(dtype={'low':'float64','high':'float64','open_ts':'int64'})
+        a = []
+        for down_percent in range(40,100,10):
+            for up_percent in range(10,110,10):
+                print('working on down_percent {} and up_percent {}'.format(down_percent,up_percent))
+                ratio,total_occur_count = self.price_down_then_up(df,down_percent=down_percent,up_percent=up_percent,down_days=down_days,up_days=up_days)
+                a.append([down_percent,up_percent,ratio,total_occur_count])
+        df = pd.DataFrame(a,columns = ['down_percent','up_percent','ratio','total_occur_count'])
+        return df
+    
+    def find_low_price(self,klines_by_file=True,days=3, down_percent=50):
+        if klines_by_file:
+            df = pd.read_csv('all_klines.csv')
+        else:
+            df=self.get_all_klines(interval='1h',limit=24*days)
+        df_current_price=df.assign(rn=df.sort_values(['open_ts'], ascending=False).groupby(['symbol']).cumcount()).query('rn == 0')[['open_ts','low','symbol']]
+        df_all = df[df['open_ts']>=int(time.time()*1000-days*24*3600*1000)]
+        df_low_price=pd.merge(df_all,df_current_price, on='symbol').astype(dtype={'low_y':'float64','high':'float64'}).query('open_ts_x < open_ts_y and low_y < high*{}'
+                             .format(1-down_percent/100.0))[['open_ts_x','open_ts_y','symbol','low_y','high']]
+        return df_low_price
+    
+    def auto_trade(self,symbols=['BTCUSDT'],allow_buy=True,allow_sell=True):
+        trade_success_sleep=10
+        interval_sleep=5
+        while True:
+            for symbol in symbols:
+                if allow_sell and self._check_sell_condition(symbol):
+                    sell_success=self.sell_symbol(symbol,amount)
+                    if sell_success:
+                        time.sleep(trade_success_sleep)
+                    else:
+                        time.sleep(interval_sleep)
+                if allow_buy and self._check_buy_condition(symbol):
+                    buy_success=self.buy_symbol(symbol,amount)
+                    if buy_success:
+                        time.sleep(trade_success_sleep)
+                    else:
+                        time.sleep(interval_sleep)
+                        
+    def _check_sell_condition(self,symbol):
+        pass
+    
+    def _check_buy_condition(self,symbol):
+        pass
+    
                 
             
 if __name__== '__main__':
     #Agent('binance').pull_depth_trade(symbol='BTCUSDT')
     #print(datetime.fromtimestamp(1516246476484/1000).strftime('%Y-%m-%d %H-%M'))
-    with open('order_book_BTCUSDT.json', 'r') as f1,open('order_book_BTCUSDT_1.json', 'r') as f2,open('order_book_BTCUSDT_3.json','r') as f3:
+    """with open('order_book_BTCUSDT.json', 'r') as f1,open('order_book_BTCUSDT_1.json', 'r') as f2,open('order_book_BTCUSDT_3.json','r') as f3:
         d1 = json.load(f1)
         d2 = json.load(f2)
         d3 = json.load(f3)
     #df = Agent.process_depth_trade({**d1,**d2,**d3})
     df = Agent.process_depth_trade(d3)
-    Agent.analyze_depth_trade(df)
+    df.to_csv('processed_output.csv')
+    Agent.analyze_depth_trade(df)"""
+    df=Agent('binance').find_all_price_down_then_up()
+    df.to_csv('price_up_down_new.csv')
+    """df=pd.read_csv('price_up_down.csv')
+    plt.figure()
+    sns.heatmap(df.pivot('down_percent','up_percent','ratio'))
+    plt.figure()
+    sns.heatmap(df.pivot('down_percent','up_percent','total_symbol_count'))
+    df = Agent('binance').find_low_price()
+    df.to_csv('low_price.csv')"""
+    
