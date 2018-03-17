@@ -14,7 +14,6 @@ import json
 from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
-import math
 
 class Agent():
     INTERVAL_1MIN='1m'
@@ -32,7 +31,9 @@ class Agent():
     
     trade_strategy = {'single_sell_ratio':0.1,'single_buy_ratio':0.1}
     avg_unsold_symbols_price_ratio = 0.90
-        
+    down_percent_list=[25,30,35,40,45]
+    up_percent_list=[10,20,30,40,45]  
+    
     def __init__(self,trader):
         assert trader in self.traders.keys(), 'Not valid trading platform!'
         self.trader = trader
@@ -101,7 +102,7 @@ class Agent():
             df.columns=['open_ts','open','high','low','close','volume','asset_volume','trades']
             df['symbol'] = params['symbol']
             df['interval'] = params['interval']
-            return df
+            return df.astype(dtype={'low':'float64','high':'float64','open_ts':'int64','close':'float64','open':'float64','volume':'float64','asset_volume':'float64','trades':'int64'})
         elif self.trader == 'huobi':
             path = 'market/history/kline'
             params['size'] = params['limit']
@@ -112,7 +113,7 @@ class Agent():
             df['open_ts'] = df['open_ts']*1000
             df['symbol'] = params['symbol']
             df['interval'] = params['interval']
-            return df
+            return df.astype(dtype={'low':'float64','high':'float64','open_ts':'int64','close':'float64','open':'float64','volume':'float64','asset_volume':'float64','trades':'int64'})
         else:
             raise BaseException
     
@@ -121,7 +122,7 @@ class Agent():
         return dataframe with columns: 'open_ts','open','high','low','close','volume','asset_volume','trades','symbol','interval'
         """
         if klines_file is not None:
-            self.all_klines=pd.read_csv(klines_file)
+            self.all_klines=pd.read_csv(klines_file,dtype={'low':'float64','high':'float64','open_ts':'int64','close':'float64','open':'float64','volume':'float64','asset_volume':'float64','trades':'int64'})
             return self.all_klines
         if not self.all_symbol_price or refresh_all_symbols:
             self.get_all_symbol_price()
@@ -169,7 +170,6 @@ class Agent():
                     trade_id = [i['a'] for i in trades]
                 except Exception as e:
                     print('error:', e)
-                    print('error happens at '+str(datetime.now()))
                     time.sleep(300)
                     continue
                 diff_bids = np.setdiff1d(bids,previous_bids)
@@ -236,12 +236,11 @@ class Agent():
         plt.show()
     
     def price_down_then_up(self,cleaned_klines,down_days=4,up_days=6,down_percent=40,up_percent=10):
-        df = cleaned_klines
-        df_low_price=pd.merge(df,df, on=['symbol']).query('open_ts_x > open_ts_y and open_ts_x-open_ts_y<={}*24*3.6 and low_x <= high_y*{}'
+        df_low_price=pd.merge(cleaned_klines,cleaned_klines, on=['symbol']).query('open_ts_x > open_ts_y and open_ts_x-open_ts_y<={}*24*3.6 and low_x <= high_y*{}'
                              .format(down_days,1-down_percent/100.0))[['open_ts_x','open_ts_y','low_x','high_y','symbol']]\
                              .rename(columns={"open_ts_x": "ts_low", "open_ts_y": "ts_high","low_x":"low_price",'high_y':'high_price'}).reset_index(drop=True)
         df_low_price['unique_id']=df_low_price.index.values
-        df_price_recover=pd.merge(df,df_low_price, on=['symbol']).query('open_ts > ts_low and open_ts-ts_low<={}*24*3.6 and high >= low_price*{}'
+        df_price_recover=pd.merge(cleaned_klines,df_low_price, on=['symbol']).query('open_ts > ts_low and open_ts-ts_low<={}*24*3.6 and high >= low_price*{}'
                                  .format(up_days,1+up_percent/100.0))[['unique_id','symbol']].drop_duplicates()
         num_price_recover=len(df_price_recover)
         num_symbol_recover=len(df_price_recover['symbol'].drop_duplicates())
@@ -249,7 +248,7 @@ class Agent():
         ratio = 0 if len(df_low_price)==0 else num_price_recover/float(len(df_low_price))
         print(ratio,num_price_recover,num_symbol_recover,num_symbol_down)
         pd.merge(df_low_price.groupby('symbol',as_index=False).agg('size').reset_index(),df_price_recover.groupby('symbol',as_index=False).agg('size').reset_index(),
-                 how='left',on='symbol').to_csv('symbol_breakdown_{}_{}.csv'.format(down_percent,up_percent),index=False)
+                 how='left',on='symbol').rename(columns={'0_x':'drop_count','0_y':'recover_count'}).query('drop_count>=30').to_csv('symbol_breakdown_{}_{}.csv'.format(down_percent,up_percent),index=False)
         return ratio,num_price_recover,num_symbol_recover,num_symbol_down
 
     def find_unsold_symbols_drop_percent(self,down_days=4,up_days=6,down_percent=30,up_percent=10,klines_file=None):
@@ -277,23 +276,45 @@ class Agent():
         df['open_ts'] = df['open_ts']/1000000
         df= df.assign(rn=df.sort_values(['open_ts'], ascending=True).groupby(['symbol']).cumcount()).query('rn >= 24').astype(dtype={'low':'float64','high':'float64','open_ts':'int32'})[['open_ts','low','high','symbol']]
         a = []
-        for down_percent in [26,28,30,32,34]:
-            for up_percent in [11,15,17,19,21]:
+        for down_percent in self.down_percent_list:
+            for up_percent in self.up_percent_list:
                 print('working on down_percent {} and up_percent {}'.format(down_percent,up_percent))
                 ratio,total_occur_count,symbol_recover,symbol_down = self.price_down_then_up(df,down_percent=down_percent,up_percent=up_percent,down_days=down_days,up_days=up_days)
                 a.append([down_percent,up_percent,ratio,total_occur_count,symbol_down,symbol_recover/float(symbol_down),ratio*(1+up_percent/100.0)+(1-ratio)*self.avg_unsold_symbols_price_ratio])
         df = pd.DataFrame(a,columns = ['down_percent','up_percent','occur_ratio','total_occur_count','symbol_count','symbol_ratio','expected_return_rate'])
         return df
     
-    def find_low_price(self,klines_file=None,days=4, down_percent=40,save_klines=False):
+    def find_low_price(self,price_down_up_file,klines_file=None,days=4,save_klines=False):
+        df2=pd.read_csv(price_down_up_file,usecols=['down_percent','up_percent','expected_return_rate'],
+                    dtype={'down_percent':np.int32,'up_percent':np.int32,'expected_return_rate':np.float64})
+        df_best_return= df2.assign(rn=df2.sort_values(['expected_return_rate'], ascending=False).groupby(['down_percent']).cumcount()).query('rn ==0')[['down_percent','up_percent']]
         df=self.get_all_klines(interval='1h',limit=24*(days+1),klines_file=klines_file,save_klines=save_klines)
         df['open_ts'] = df['open_ts']/1000000
         df= df.assign(rn=df.sort_values(['open_ts'], ascending=True).groupby(['symbol']).cumcount()).query('rn >= 24').astype(dtype={'low':'float64','high':'float64','open_ts':'int32'})[['open_ts','low','high','symbol']]
         df_current_price=pd.DataFrame([[k,v] for k,v in self.get_all_symbol_price().items()],columns=['symbol','price'])
         df_all = df[df['open_ts']>=int(time.time()/1000-days*24*3.6)]
-        df_low_price=pd.merge(df_all,df_current_price, on='symbol').query('price <= high*{}'
+        df_output=pd.DataFrame()
+        for index,row in df_best_return.iterrows():
+            down_percent=row['down_percent']
+            print('working on down_percent {}'.format(down_percent))
+            df_low_price=pd.merge(df_all,df_current_price, on='symbol').query('price <= high*{}'
                              .format(1-down_percent/100.0))[['symbol','price']].drop_duplicates()
-        return df_low_price
+            df_low_price['down_percent']=down_percent
+            up_percent=df_best_return.query('down_percent == {}'.format(down_percent)).iat[0,1]
+            df_low_price['up_percent']=up_percent
+            df_symbol_breakdown=pd.read_csv('symbol_breakdown_{}_{}.csv'.format(down_percent,up_percent),dtype={'drop_count':np.float64,'recover_count':np.float64})
+            df_low_price=pd.merge(df_low_price,df_symbol_breakdown,how='left',on='symbol')
+            df_low_price['history_ratio']=df_low_price['recover_count']/df_low_price['drop_count']
+            df_low_price['sell_price']=df_low_price['price']*(1+df_low_price['up_percent']/100.0)
+            df_output=pd.concat([df_low_price,df_output])
+        df_output=pd.merge(df_output,df2,on=['down_percent','up_percent'])
+        df_highest_ratio=df_output.groupby('symbol',as_index=False).agg({'history_ratio':np.max}).reset_index()
+        df_output=df_output.query('history_ratio>0.5 or not history_ratio==history_ratio')
+        df_output['history_return_rate']=df_output['history_ratio']*(1+df_output['up_percent']/100.0) + (1-df_output['history_ratio'])*self.avg_unsold_symbols_price_ratio
+        df_output['merged_return_rate']=df_output.apply(lambda row: max(row['expected_return_rate'],row['history_return_rate']),axis=1)
+        df_output= df_output.assign(rn=df_output.sort_values(['merged_return_rate'], ascending=False).groupby(['symbol']).cumcount()).query('rn ==0')[['symbol','price','sell_price','history_ratio','expected_return_rate','merged_return_rate','up_percent','down_percent']]
+        df_output=pd.merge(df_output,df_highest_ratio,on='symbol').query('history_ratio_y>0.5 or not history_ratio_y==history_ratio_y')[['symbol','price','sell_price','history_ratio_x','expected_return_rate','merged_return_rate','up_percent','down_percent']]
+        return df_output
     
     def auto_trade(self,symbols=['BTCUSDT'],allow_buy=True,allow_sell=True):
         trade_success_sleep=10
@@ -350,11 +371,11 @@ if __name__== '__main__':
         print('------------working on file {}'.format(i))
         df=Agent('binance').find_all_price_down_then_up(klines_file='all_klines_binance_{}.csv'.format(i))
         df.to_csv('price_down_up_{}.csv'.format(i),index=False)"""
-    #df=Agent('binance').find_all_price_down_then_up(klines_file='all_klines_binance_4.csv')
-    #df.to_csv('price_down_up.csv',index=False)
+    df=Agent('binance').find_all_price_down_then_up(klines_file='all_klines_binance.csv')
+    df.to_csv('price_down_up.csv',index=False)
     #unsold_drop_percent=Agent('binance').find_unsold_symbols_drop_percent(klines_file='all_klines_binance_3.csv',down_percent=42,up_percent=40)
     #print('average price down percent is {}'.format( unsold_drop_percent))
-    df=Agent('binance').find_low_price(down_percent=34)
+    df=Agent('binance').find_low_price('price_down_up.csv',klines_file='all_klines_binance.csv')
     df.to_csv('low_price.csv',index=False)
     """df=pd.read_csv('price_up_down.csv')
     plt.figure()
